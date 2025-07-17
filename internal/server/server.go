@@ -12,174 +12,143 @@ import (
 
     "github.com/mshort2/distributed-rate-limiter/internal/config"
     "github.com/mshort2/distributed-rate-limiter/internal/middleware"
+    "github.com/mshort2/distributed-rate-limiter/pkg/ratelimiter"
 )
 
-type RateLimitResponse struct {
-    Allowed     bool   `json:"allowed"`
-    Remaining   int    `json:"remaining"`
-    ResetTime   int64  `json:"reset_time"`
-    ClientID    string `json:"client_id"`
-    Region      string `json:"region"`
-    RequestID   string `json:"request_id"`
-}
-
 type Server struct {
-    config *config.Config
-    server *http.Server
+    config    *config.Config
+    server    *http.Server
+    rl        *limiter.SlidingWindowLimiter
+    startTime time.Time
 }
 
 func NewServer(cfg *config.Config) *Server {
     mux := http.NewServeMux()
-    
-    // Health check endpoint
-    mux.HandleFunc("/health", healthHandler)
-    
-    // Rate limit check endpoint
-    mux.HandleFunc("/check", rateLimitHandler)
-    
-    // Admin endpoints
-    mux.HandleFunc("/admin/stats", statsHandler)
-    mux.HandleFunc("/admin/config", configHandler)
-    
-    // Wrap with middleware
+    srv := &Server{
+        config:    cfg,
+        startTime: time.Now(),
+    }
+
+    mux.HandleFunc("/health", srv.healthHandler)
+    mux.HandleFunc("/check", srv.rateLimitHandler)
+    mux.HandleFunc("/admin/stats", srv.statsHandler)
+    mux.HandleFunc("/admin/config", srv.configHandler)
+
     handler := middleware.Chain(
         middleware.RequestID,
         middleware.Logging,
         middleware.Recovery,
         middleware.CORS,
     )(mux)
-    
-    server := &http.Server{
+
+    srv.server = &http.Server{
         Addr:         ":" + cfg.Server.Port,
         Handler:      handler,
         ReadTimeout:  cfg.Server.ReadTimeout,
         WriteTimeout: cfg.Server.WriteTimeout,
     }
-    
-    return &Server{
-        config: cfg,
-        server: server,
+
+    rl, err := limiter.NewRateLimiter(cfg, cfg.RateLimit.DefaultLimit, cfg.RateLimit.DefaultWindow)
+    if err != nil {
+        log.Fatalf("Failed to create rate limiter: %v", err)
     }
+    srv.rl = rl
+
+    return srv
 }
 
-func rateLimitHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) rateLimitHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost {
         http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
         return
     }
-    
-    // Extract client identifier
+
     clientID := extractClientID(r)
     requestID := r.Header.Get("X-Request-ID")
-    
-    // TODO: Replace with actual rate limiter
-    // For now, implement simple mock with realistic behavior
-    response := RateLimitResponse{
-        Allowed:   true,
-        Remaining: 95,
-        ResetTime: time.Now().Add(time.Minute).Unix(),
-        ClientID:  clientID,
-        Region:    "us-east-1", // Will be dynamic later
-        RequestID: requestID,
+
+    response, err := s.rl.Allow(r.Context(), clientID, requestID)
+    if err != nil {
+        http.Error(w, "Rate limiter error", http.StatusInternalServerError)
+        return
     }
-    
-    // Add realistic response time simulation
-    time.Sleep(time.Millisecond * 2)
-    
-    // Set appropriate status code
+
     if response.Allowed {
         w.WriteHeader(http.StatusOK)
     } else {
         w.WriteHeader(http.StatusTooManyRequests)
     }
-    
+
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(response)
 }
 
 func extractClientID(r *http.Request) string {
-    // Priority order: API key > X-Client-ID header > IP address
     if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
         return apiKey
     }
-    
     if clientID := r.Header.Get("X-Client-ID"); clientID != "" {
         return clientID
     }
-    
-    // Extract real IP (handle proxy headers)
     if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
         return realIP
     }
-    
     if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
         return forwarded
     }
-    
     return r.RemoteAddr
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
     health := map[string]string{
         "status":    "healthy",
         "timestamp": time.Now().UTC().Format(time.RFC3339),
         "version":   "1.0.0",
     }
-    
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(health)
 }
 
-func statsHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) statsHandler(w http.ResponseWriter, r *http.Request) {
     stats := map[string]interface{}{
         "requests_total":   1000,
         "requests_allowed": 950,
         "requests_denied":  50,
-        "uptime_seconds":   time.Since(time.Now()).Seconds(),
+        "uptime_seconds":   time.Since(s.startTime).Seconds(),
     }
-    
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(stats)
 }
 
-func configHandler(w http.ResponseWriter, r *http.Request) {
-    cfg := config.Load()
-    
-    // Mask sensitive information
+func (s *Server) configHandler(w http.ResponseWriter, r *http.Request) {
     safeCfg := map[string]interface{}{
         "server": map[string]interface{}{
-            "port": cfg.Server.Port,
+            "port": s.config.Server.Port,
         },
         "rate_limit": map[string]interface{}{
-            "default_limit":  cfg.RateLimit.DefaultLimit,
-            "default_window": cfg.RateLimit.DefaultWindow.String(),
+            "default_limit":  s.config.RateLimit.DefaultLimit,
+            "default_window": s.config.RateLimit.DefaultWindow.String(),
         },
     }
-    
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(safeCfg)
 }
 
 func (s *Server) Start() error {
-    // Start server in a goroutine
     go func() {
         log.Printf("Server starting on port %s", s.config.Server.Port)
         if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
             log.Fatalf("Server failed to start: %v", err)
         }
     }()
-    
-    // Wait for interrupt signal
+
     quit := make(chan os.Signal, 1)
     signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
     <-quit
-    
+
     log.Println("Server shutting down...")
-    
-    // Graceful shutdown with timeout
     ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
     defer cancel()
-    
+
     return s.server.Shutdown(ctx)
 }
 
