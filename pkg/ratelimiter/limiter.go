@@ -92,3 +92,10 @@ func (l *SlidingWindowLimiter) Allow(ctx context.Context, key string, requestID 
 		RequestID:   requestID,
 	}, nil
 }
+
+func (l *SlidingWindowLimiter) Health(ctx context.Context) error {
+	if err := l.redisDB.Health(ctx); err != nil {
+		return fmt.Errorf("redis health check failed: %w", err)
+	}
+	return nil
+}

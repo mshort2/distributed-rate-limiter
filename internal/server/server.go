@@ -99,8 +99,13 @@ func extractClientID(r *http.Request) string {
 }
 
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
+    redisHealth := "healthy"
+    if err := s.rl.Health(r.Context()); err != nil {
+        redisHealth = "unhealthy"
+    }
+
     health := map[string]string{
-        "status":    "healthy",
+        "status":    redisHealth,
         "timestamp": time.Now().UTC().Format(time.RFC3339),
         "version":   "1.0.0",
     }
