@@ -19,10 +19,10 @@ type RateLimitResponse struct {
 }
 
 type SlidingWindowLimiter struct {
-	redisDB *redis.Client
-	limit       int
-	windowSize  time.Duration
-	sha        string
+	RedisDB   *redis.Client
+	limit     int
+	windowSize time.Duration
+	sha       string
 }
 
 func NewRateLimiter(cfg *config.Config, limit int, windowSize time.Duration) (*SlidingWindowLimiter, error) {
@@ -32,14 +32,16 @@ func NewRateLimiter(cfg *config.Config, limit int, windowSize time.Duration) (*S
     local now = tonumber(ARGV[1])
     local window = tonumber(ARGV[2])
     local limit = tonumber(ARGV[3])
+	local member = now .. "-" .. ARGV[4]
     redis.call("ZREMRANGEBYSCORE", key, 0, now - window)
     local count = redis.call("ZCARD", key)
     if count >= limit then
         return {0, limit - count}
     end
-    redis.call("ZADD", key, now, now)
+    redis.call("ZADD", key, now, member)
     redis.call("EXPIRE", key, math.ceil(window / 1000) * 2)
-    return {1, limit - (count + 1)}
+	count = redis.call("ZCARD", key)
+    return {1, limit - count}
     `
 
 	client, err := redis.NewClient(cfg)
@@ -53,8 +55,8 @@ func NewRateLimiter(cfg *config.Config, limit int, windowSize time.Duration) (*S
 	}
 
     return &SlidingWindowLimiter{
-        redisDB:     client,
-        limit:      limit,
+        RedisDB:   client,
+        limit:     limit,
         windowSize: windowSize,
         sha:       sha,
     }, nil
@@ -67,7 +69,7 @@ func (l *SlidingWindowLimiter) Allow(ctx context.Context, key string, requestID 
 	limit := int64(l.limit)
 
 	// Execute the Lua script atomically
-	result, err := l.redisDB.EvalSha(ctx, l.sha, []string{key}, now, window, limit)
+	result, err := l.RedisDB.EvalSha(ctx, l.sha, []string{key}, now, window, limit, requestID)
 	if err != nil {
 		return RateLimitResponse{}, fmt.Errorf("failed to execute rate limit script: %w", err)
 	}
@@ -94,7 +96,7 @@ func (l *SlidingWindowLimiter) Allow(ctx context.Context, key string, requestID 
 }
 
 func (l *SlidingWindowLimiter) Health(ctx context.Context) error {
-	if err := l.redisDB.Health(ctx); err != nil {
+	if err := l.RedisDB.Health(ctx); err != nil {
 		return fmt.Errorf("redis health check failed: %w", err)
 	}
 	return nil

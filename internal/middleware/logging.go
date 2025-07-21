@@ -25,7 +25,7 @@ func RequestID(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         requestID := r.Header.Get("X-Request-ID")
         if requestID == "" {
-            requestID = generateRequestID()
+            requestID = GenerateRequestID()
         }
         
         ctx := context.WithValue(r.Context(), "request_id", requestID)
@@ -89,7 +89,7 @@ func (rw *responseWriter) WriteHeader(code int) {
     rw.ResponseWriter.WriteHeader(code)
 }
 
-func generateRequestID() string {
+func GenerateRequestID() string {
     bytes := make([]byte, 8)
     rand.Read(bytes)
     return hex.EncodeToString(bytes)
